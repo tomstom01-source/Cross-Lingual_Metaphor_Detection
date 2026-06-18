@@ -1,0 +1,35 @@
+# Trained model files (large binary files)
+*.bin
+
+# Tokenizer directories
+metaphor_tokenizer/
+tokenizer/
+__pycache__/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# VUAMC corpus data (large XML files)
+data/VUAMC/
+*.xml
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
