@@ -1,9 +1,15 @@
 # Trained model files (large binary files)
 *.bin
+models/
 
 # Tokenizer directories
 metaphor_tokenizer/
 tokenizer/
+
+# Generated data files
+data/corpus_extracts/
+
+# Python cache
 __pycache__/
 
 # Python cache
@@ -18,10 +24,6 @@ env/
 ENV/
 env.bak/
 venv.bak/
-
-# VUAMC corpus data (large XML files)
-data/VUAMC/
-*.xml
 
 # IDE and editor files
 .vscode/

@@ -1,0 +1,6 @@
+# Core dependencies for VUAMC metaphor detection
+# Tested with the versions below
+torch>=2.5
+transformers>=4.40
+numpy>=1.24
+tqdm>=4.60

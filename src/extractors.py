@@ -1,8 +1,10 @@
+import os
 import xml.etree.ElementTree as etree
 import copy
 
 def extract_xml_subset(xml_input_file, xml_output_file, number_of_sentences=50):
-    # Parse the XML file
+    """Extract first N sentences from XML file and save to new XML file."""
+    os.makedirs(os.path.dirname(xml_output_file), exist_ok=True)
     tree = etree.parse(xml_input_file)
     root = tree.getroot()
     
@@ -42,10 +44,8 @@ def extract_xml_subset(xml_input_file, xml_output_file, number_of_sentences=50):
     text_elem = etree.SubElement(group, f'{{{ns_uri}}}text')
     text_elem.set('xml:id', 'subset-fragment01')
     
-    # Create body
     body = etree.SubElement(text_elem, f'{{{ns_uri}}}body')
     
-    # Create div1
     div1 = etree.SubElement(body, f'{{{ns_uri}}}div1')
     div1.set('n', 'subset extracted')
     div1.set('type', 'u')
@@ -59,11 +59,36 @@ def extract_xml_subset(xml_input_file, xml_output_file, number_of_sentences=50):
     
     # Create a new tree with the modified root
     new_tree = etree.ElementTree(new_root)
-    
-    # Write the modified XML to the output file
     new_tree.write(xml_output_file, encoding='utf-8', xml_declaration=True)
     
     print(f"Extracted {len(selected_sentences)} sentences to {xml_output_file}")
+
+
+def clean_word_text(text):
+    """Clean word text by removing newlines and stripping whitespace."""
+    if not text:
+        return ''
+    # Take content before the first newline, then strip leading/trailing whitespace.
+    return text.split('\n')[0].strip()
+
+
+def get_word_text(elem, seg_elem=None):
+    """Extract word text from XML element, handling <seg> elements for metaphors."""
+    if seg_elem is not None:
+        prefix = clean_word_text(elem.text if elem.text else '')
+        if not prefix.strip():
+            prefix = ''
+        # Strip trailing whitespace from seg_elem.text: the <seg> element stores the word form
+        # and any trailing space inside it is a word-separator, not part of the word itself.
+        # Spacing between words is handled separately by the add_trailing_space logic.
+        seg_text = seg_elem.text.rstrip() if seg_elem.text else ''
+        return prefix + seg_text
+    return clean_word_text(elem.text if elem.text else '')
+
+
+def is_classifiable_word(word_text):
+    """Check if word contains alphanumeric characters."""
+    return any(char.isalnum() for char in word_text)
 
 
 def extract_vuamc_data(xml_file_path):
@@ -110,80 +135,151 @@ def extract_vuamc_data(xml_file_path):
         children = list(sent_elem)
         
         for i, elem in enumerate(children):
-            # Process word elements
-            if elem.tag.endswith('w') or 'w' in elem.tag:
-                # Check if this word has metaphor annotation
+            # Resolve the local tag name (strip namespace prefix if present)
+            elem_local = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+
+            # ── Process word elements ────────────────────────────────────────
+            if elem_local == 'w':
+                word_type = elem.get('type', '')
                 seg_elem = elem.find('.//seg[@function="mrw"][@type="met"]')
                 if seg_elem is None:
                     seg_elem = elem.find('.//tei:seg[@function="mrw"][@type="met"]', namespace)
-                
-                # Get the word text
+
                 if seg_elem is not None:
-                    # For metaphor words, seg element contains the word
-                    seg_text = seg_elem.text if seg_elem.text else ''
-                    
-                    # Check next element to decide if we need trailing space
-                    # Add space only if next element's text starts with alphanumeric or opening bracket
-                    # If next element's text starts with whitespace, preserve it (don't add trailing space)
-                    next_elem = children[i + 1] if i + 1 < len(children) else None
-                    add_trailing_space = False
-                    if next_elem is not None:
-                        # Check if next element is also a metaphor word
-                        next_seg = next_elem.find('.//seg[@function="mrw"][@type="met"]')
-                        if next_seg is None:
-                            next_seg = next_elem.find('.//tei:seg[@function="mrw"][@type="met"]', namespace)
-                        
-                        if next_seg is not None and next_seg.text:
-                            # Next is a metaphor word, check its seg text
-                            next_text = next_seg.text
-                        elif next_elem.text:
-                            # Next is a regular word, check its parent text
-                            next_text = next_elem.text
-                        else:
-                            next_text = ''
-                        
-                        if next_text:
-                            # If next text starts with whitespace, preserve it (don't add trailing space)
-                            if next_text[0].isspace():
-                                add_trailing_space = False
-                            # If next text starts with alphanumeric or opening bracket, add trailing space
-                            elif next_text[0].isalnum() or next_text[0] in ['(', '[', '{']:
-                                add_trailing_space = True
-                            # If next text starts with punctuation, don't add trailing space
-                            else:
-                                add_trailing_space = False
-                    
-                    sentence_text = seg_text + (' ' if add_trailing_space else '')
-                    word_for_classification = seg_text.strip()
+                    # Metaphor word: text lives inside <seg>
+                    word_text = get_word_text(elem, seg_elem)
                     label = 1
                 else:
-                    # For non-metaphor words, use parent element text as-is
-                    # Skip if parent element is only whitespace (XML formatting)
+                    # Literal word: skip whitespace-only placeholder elements
                     if elem.text and not elem.text.strip():
                         continue
-                    # Extract only the actual word (before any newlines in the text)
-                    full_text = elem.text if elem.text else ''
-                    sentence_text = full_text.split('\n')[0] if '\n' in full_text else full_text
-                    word_for_classification = sentence_text.strip() if sentence_text else ''
+                    word_text = get_word_text(elem)
                     label = 0
-                
-                # Skip if the word text is only whitespace (XML formatting)
-                if not word_for_classification or not sentence_text:
+
+                # clean_word_text already strips, but be explicit for safety
+                word_text = word_text.strip()
+                if not word_text:
                     continue
-                
-                # Add to sentence as-is (preserving original spacing)
+
+                # ── Unified trailing-space logic (literal AND metaphor) ──────
+                # Look ahead to the first *meaningful* element, skipping
+                # whitespace-only placeholder <w> elements that contribute no
+                # text (BNC artefacts). Space is added when the next token
+                # starts an alphanumeric word or an opening bracket; it is
+                # omitted before punctuation (which carries its own spacing).
+                next_meaningful = None
+                for j in range(i + 1, len(children)):
+                    cand = children[j]
+                    cand_tag = cand.tag.split('}')[-1] if '}' in cand.tag else cand.tag
+                    if cand_tag.endswith('c') or cand_tag == 'c':
+                        # Punctuation is always a meaningful stop
+                        next_meaningful = cand
+                        break
+                    if cand_tag.endswith('w') or cand_tag == 'w':
+                        cand_seg = cand.find('.//seg[@function="mrw"][@type="met"]')
+                        if cand_seg is None:
+                            cand_seg = cand.find('.//tei:seg[@function="mrw"][@type="met"]', namespace)
+                        if get_word_text(cand, cand_seg).strip():
+                            next_meaningful = cand
+                            break
+                        # else: empty placeholder — keep scanning
+
+                add_trailing_space = False
+                if next_meaningful is not None:
+                    nm_tag = next_meaningful.tag.split('}')[-1] if '}' in next_meaningful.tag else next_meaningful.tag
+                    if nm_tag.endswith('c') or nm_tag == 'c':
+                        # Next is punctuation: only add space before opening brackets/parens.
+                        # Closing punctuation (,  .  :  ;  !  ?  )) and apostrophes attach
+                        # directly to the preceding word — the <c> element itself carries
+                        # the trailing space.
+                        nm_text = (next_meaningful.text or '').strip()
+                        if nm_text and nm_text[0] in ('(', '[', '{'):
+                            add_trailing_space = True
+                    else:
+                        # Next is a word element: always add a space, EXCEPT before a
+                        # contraction/possessive suffix that starts with an apostrophe
+                        # (e.g. 's, 've, 'll — those attach directly to the preceding word),
+                        # or before an n't negation clitic (do + n't → don't).
+                        nm_seg = next_meaningful.find('.//seg[@function="mrw"][@type="met"]')
+                        if nm_seg is None:
+                            nm_seg = next_meaningful.find('.//tei:seg[@function="mrw"][@type="met"]', namespace)
+                        next_text = get_word_text(next_meaningful, nm_seg).strip()
+                        if not next_text.startswith("'") and not next_text.startswith("n'"):
+                            add_trailing_space = True
+
+                sentence_text = word_text + (' ' if add_trailing_space else '')
+                word_for_classification = word_text
+
+                if not word_for_classification:
+                    continue
+
+                # ── Apostrophe / contraction suffixes ('s, 've, 'll, 't, 're) ──
+                # Only merge genuine contractions (len > 1). A bare standalone
+                # quote char (len == 1) falls through to the POS skip below.
+                if word_for_classification.startswith("'") and len(word_for_classification) > 1:
+                    # Remove any trailing space from the preceding word so that
+                    # e.g. "Party " + "'s " becomes "Party's " not "Party 's "
+                    if sentence_parts:
+                        sentence_parts[-1] = sentence_parts[-1].rstrip(' ')
+                    sentence_parts.append(sentence_text)
+                    if current_words:
+                        current_words[-1] = f"{current_words[-1]}{word_for_classification}"
+                    continue
+
+                # ── BNC negation clitic (n't) ────────────────────────────────
+                # BNC stores contractions like "don't" / "can't" / "shouldn't"
+                # as two separate <w> elements: the auxiliary/verb (e.g. "do")
+                # and the negation clitic tagged XX0 (e.g. "n't").  Merge the
+                # clitic back onto the preceding word so the reconstructed
+                # sentence reads "don't" rather than "do n't".
+                if word_for_classification.startswith("n'"):
+                    if sentence_parts:
+                        sentence_parts[-1] = sentence_parts[-1].rstrip(' ')
+                    sentence_parts.append(sentence_text)
+                    if current_words:
+                        current_words[-1] = f"{current_words[-1]}{word_for_classification}"
+                    else:
+                        # Edge case: n't with no preceding word — keep as standalone
+                        current_words.append(word_for_classification)
+                        current_labels.append(label)
+                    continue
+
+                # POS-type elements are possessive markers (plural ' or singular 's).
+                # They always attach to the preceding word — strip any trailing space
+                # from the previous sentence part and merge into the preceding word entry.
+                if word_type == 'POS':
+                    if sentence_parts:
+                        sentence_parts[-1] = sentence_parts[-1].rstrip(' ')
+                    sentence_parts.append(sentence_text)
+                    if current_words:
+                        current_words[-1] = f"{current_words[-1]}{word_for_classification}"
+                    continue
+
                 if sentence_text:
                     sentence_parts.append(sentence_text)
-                
-                # Add to words_only only if it's a real word (not punctuation)
-                if word_for_classification and word_for_classification not in [',', '.', ':', ';', '!', '?', '"', "'", '""', '"', '(', ')', '[', ']', '{', '}']:
-                    current_words.append(word_for_classification)
-                    current_labels.append(label)
-            
-            # Process punctuation elements
-            elif elem.tag.endswith('c') or 'c' in elem.tag:
+
+                if is_classifiable_word(word_for_classification):
+                    # Some BNC <w> elements are multi-word units (e.g. "per cent",
+                    # "in answer to"). The sentence keeps them as-is, but words_only
+                    # must list each whitespace-separated token separately so it stays
+                    # 1:1 with the tokenizer's word segmentation (which splits on
+                    # spaces). Each piece inherits the same metaphor label.
+                    pieces = word_for_classification.split()
+                    for piece in pieces:
+                        if is_classifiable_word(piece):
+                            current_words.append(piece)
+                            current_labels.append(label)
+
+            # ── Process punctuation elements ──────────────────────────────────
+            elif elem_local == 'c':
                 punct_text = elem.text if elem.text else ''
-                # Add to sentence as-is (preserving original spacing)
+                # BNC opening quotation marks carry a trailing space in their
+                # text content (e.g. '\u2018 ').  That space is a BNC word-
+                # separator artefact — an opening quote must sit flush against
+                # the first quoted word, so we strip it here.
+                _OPENING_QUOTES = {'\u2018', '\u201c', '\u00ab', '\u2039'}  # ' " « ‹
+                if punct_text.rstrip() in _OPENING_QUOTES:
+                    punct_text = punct_text.rstrip()
                 if punct_text:
                     sentence_parts.append(punct_text)
                 # Don't add to words_only or word_labels
@@ -197,85 +293,3 @@ def extract_vuamc_data(xml_file_path):
     
     return sentences, words_only, word_labels
 
-
-def display_extraction_results(sentences, words_only, word_labels, max_display=10):
-    """
-    Display the extraction results for verification.
-    
-    Args:
-        sentences (list): List of sentence strings (with punctuation)
-        words_only (list): List of word lists (only words, no punctuation)
-        word_labels (list): List of label lists (corresponding to words_only)
-        max_display (int): Maximum number of sentences to display
-    """
-    print("=" * 80)
-    print("VUAMC DATA EXTRACTION RESULTS")
-    print("=" * 80)
-    print(f"Total sentences extracted: {len(sentences)}")
-    print(f"Total word lists extracted: {len(words_only)}")
-    print(f"Total label lists extracted: {len(word_labels)}")
-    print()
-    
-    # Display statistics (only count word labels, not punctuation)
-    total_words = sum(len(labels) for labels in word_labels)
-    total_metaphors = sum(sum(labels) for labels in word_labels)
-    print(f"Total words (with labels): {total_words}")
-    print(f"Total metaphors (label=1): {total_metaphors}")
-    if total_words > 0:
-        print(f"Metaphor rate: {total_metaphors/total_words:.2%}")
-    print()
-    
-    # Display first few sentences
-    display_count = min(max_display, len(sentences))
-    print(f"First {display_count} sentences with detailed breakdown:")
-    print("-" * 80)
-    
-    for i in range(display_count):
-        print(f"\nSentence {i+1}:")
-        print(f"  Full text (with punctuation): {sentences[i]}")
-        print(f"  Words only: {words_only[i]}")
-        print(f"  Word labels: {word_labels[i]}")
-        
-        # Show which words are metaphors
-        metaphor_words = [words_only[i][j] for j, label in enumerate(word_labels[i]) if label == 1]
-        if metaphor_words:
-            print(f"  Metaphor words: {metaphor_words}")
-        else:
-            print("  Metaphor words: None")
-    
-    print("\n" + "-" * 80)
-    print(f"Showing {display_count} of {len(sentences)} sentences")
-    print("Full results saved to extracted_data.txt")
-    print("=" * 80)
-
-
-if __name__ == "__main__":
-    # Test the VUAMC data extraction
-    xml_file = "data/VUAMC/2541/VUAMC_first_100_sentences.xml"
-    
-    sentences, words_only, word_labels = extract_vuamc_data(xml_file)
-    display_extraction_results(sentences, words_only, word_labels, max_display=10)
-    
-    # Save to a file for reference
-    output_file = "data/VUAMC/2541/extracted_data.txt"
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("VUAMC Data Extraction Results\n")
-        f.write("=" * 80 + "\n\n")
-        f.write(f"Total sentences: {len(sentences)}\n")
-        total_words = sum(len(labels) for labels in word_labels)
-        total_metaphors = sum(sum(labels) for labels in word_labels)
-        f.write(f"Total words: {total_words}\n")
-        f.write(f"Total metaphors: {total_metaphors}\n")
-        if total_words > 0:
-            f.write(f"Metaphor rate: {total_metaphors/total_words:.2%}\n\n")
-        
-        for i in range(len(sentences)):
-            f.write(f"Sentence {i+1}:\n")
-            f.write(f"Full text: {sentences[i]}\n")
-            f.write(f"Words only: {words_only[i]}\n")
-            f.write(f"Word labels: {word_labels[i]}\n")
-            metaphor_words = [words_only[i][j] for j, l in enumerate(word_labels[i]) if l == 1]
-            f.write(f"Metaphor words: {metaphor_words}\n")
-            f.write("-" * 80 + "\n")
-    
-    print(f"\nExtraction results saved to: {output_file}")
